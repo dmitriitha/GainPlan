@@ -54,7 +54,7 @@ public class MainActivity extends android.app.Activity {
     private static final int SOFT_GREEN = Color.rgb(225, 244, 236);
     private static final int BLUE = Color.rgb(83, 160, 214);
     private static final long DAY_MS = 24L * 60L * 60L * 1000L;
-    private static final int MIGRATION_VERSION = 5;
+    private static final int MIGRATION_VERSION = 6;
 
     private LinearLayout root;
     private LinearLayout content;

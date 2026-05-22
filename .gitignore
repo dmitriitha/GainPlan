@@ -9,6 +9,9 @@ build/
 .idea/
 *.iml
 local.properties
+.keystore/
+*.jks
+*.keystore
 
 # Built packages
 *.apk
