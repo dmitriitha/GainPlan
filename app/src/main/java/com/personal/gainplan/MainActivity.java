@@ -54,7 +54,7 @@ public class MainActivity extends android.app.Activity {
     private static final int SOFT_GREEN = Color.rgb(225, 244, 236);
     private static final int BLUE = Color.rgb(83, 160, 214);
     private static final long DAY_MS = 24L * 60L * 60L * 1000L;
-    private static final int MIGRATION_VERSION = 6;
+    private static final int MIGRATION_VERSION = 7;
 
     private LinearLayout root;
     private LinearLayout content;
@@ -71,11 +71,13 @@ public class MainActivity extends android.app.Activity {
     private TrainingData.DayPlan activePlan;
     private final Map<String, TrainingData.Exercise> selected = new HashMap<>();
     private final List<TrainingData.Exercise> activeWorkout = new ArrayList<>();
-    private int activeExerciseIndex;
+    private final List<WorkoutStep> workoutSteps = new ArrayList<>();
     private int activeSet = 1;
+    private int activeStepIndex;
     private TextView timerMode;
     private TextView timerClock;
     private ProgressBar timerProgress;
+    private Button continueButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -127,6 +129,7 @@ public class MainActivity extends android.app.Activity {
 
     private void renderBottom(String active) {
         currentTab = active;
+        bottomBar.setVisibility(View.VISIBLE);
         bottomBar.removeAllViews();
         bottomBar.addView(nav("Главная", active.equals("home"), v -> showHome()));
         bottomBar.addView(nav("Упр.", active.equals("library"), v -> showExerciseLibrary()));
@@ -258,45 +261,83 @@ public class MainActivity extends android.app.Activity {
     private void startConstructedWorkout(TrainingData.DayPlan plan) {
         activePlan = plan;
         activeWorkout.clear();
+        workoutSteps.clear();
         for (String group : TrainingData.muscleGroupsFor(plan)) activeWorkout.add(selected.get(group));
-        activeExerciseIndex = 0;
-        activeSet = 1;
-        showCurrentExercise();
+        buildWorkoutSteps();
+        activeStepIndex = 0;
+        showCurrentWorkoutStep();
     }
 
-    private void showCurrentExercise() {
+    private void buildWorkoutSteps() {
+        int maxSets = 0;
+        for (TrainingData.Exercise exercise : activeWorkout) {
+            maxSets = Math.max(maxSets, setCountFor(exercise));
+        }
+        for (int set = 1; set <= maxSets; set++) {
+            for (TrainingData.Exercise exercise : activeWorkout) {
+                int totalSets = setCountFor(exercise);
+                if (set <= totalSets) workoutSteps.add(new WorkoutStep(exercise, set, totalSets));
+            }
+        }
+    }
+
+    private void showCurrentWorkoutStep() {
         clear("home");
-        if (activeWorkout.isEmpty()) {
+        bottomBar.setVisibility(View.GONE);
+        if (workoutSteps.isEmpty() || activeStepIndex >= workoutSteps.size()) {
             showHome();
             return;
         }
-        TrainingData.Exercise exercise = activeWorkout.get(activeExerciseIndex);
+        WorkoutStep step = workoutSteps.get(activeStepIndex);
+        TrainingData.Exercise exercise = step.exercise;
+        boolean timed = isTimedExercise(exercise);
         secondsLeft = exercise.workSeconds;
         restMode = false;
+        activeSet = step.setNumber;
 
-        addHeader("Упражнение " + (activeExerciseIndex + 1) + " из " + activeWorkout.size(), exercise.name);
+        addHeader("Тренировка", activePlan.title + " • " + exercise.name);
 
         LinearLayout timer = card(SURFACE);
-        timerMode = text("Подход " + activeSet + " • работа", 15, true, GREEN);
-        timerClock = text(format(secondsLeft), 52, true, INK);
+        timerMode = text("Подход " + step.setNumber + " из " + step.totalSets + " • готов", 15, true, GREEN);
+        timerClock = text(timed ? format(secondsLeft) : "Цель: " + setGoalFor(exercise), timed ? 52 : 30, true, INK);
         timerClock.setGravity(Gravity.CENTER);
-        timerProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        timerProgress.setMax(secondsLeft);
-        timerProgress.setProgress(secondsLeft);
         timer.addView(timerMode);
         timer.addView(timerClock);
-        timer.addView(timerProgress, new LinearLayout.LayoutParams(-1, dp(10)));
-        LinearLayout controls = row();
-        Button work = compactButton("Старт");
-        Button rest = compactButton("Отдых");
-        Button next = compactButton(activeExerciseIndex == activeWorkout.size() - 1 ? "На главную" : "Дальше");
-        work.setOnClickListener(v -> startTimer(exercise.workSeconds, false));
-        rest.setOnClickListener(v -> startTimer(exercise.restSeconds, true));
-        next.setOnClickListener(v -> nextExercise());
-        controls.addView(work);
-        controls.addView(rest);
-        controls.addView(next);
-        timer.addView(controls);
+        timerProgress = null;
+        if (timed) {
+            timerProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            timerProgress.setMax(secondsLeft);
+            timerProgress.setProgress(secondsLeft);
+            timer.addView(timerProgress, new LinearLayout.LayoutParams(-1, dp(10)));
+        }
+        Button start = primaryButton("Старт");
+        Button done = ghostButton("Подход выполнен");
+        continueButton = primaryButton("Продолжить");
+        setPrimaryEnabled(continueButton, false);
+        if (timed) {
+            start.setOnClickListener(v -> {
+                setPrimaryEnabled(start, false);
+                startTimer(exercise.workSeconds, false);
+            });
+        } else {
+            setGhostEnabled(done, false);
+            start.setOnClickListener(v -> {
+                setPrimaryEnabled(start, false);
+                timerMode.setText("Подход " + step.setNumber + " из " + step.totalSets + " • работа");
+                timerClock.setText("Цель: " + setGoalFor(exercise));
+                setGhostEnabled(done, true);
+            });
+            done.setOnClickListener(v -> {
+                timerMode.setText("Подход выполнен");
+                timerMode.setTextColor(GREEN);
+                setGhostEnabled(done, false);
+                setPrimaryEnabled(continueButton, true);
+            });
+        }
+        continueButton.setOnClickListener(v -> continueAfterWork());
+        timer.addView(start);
+        if (!timed) timer.addView(done, new LinearLayout.LayoutParams(-1, dp(52)));
+        timer.addView(continueButton);
         content.addView(timer);
 
         LinearLayout info = card(SURFACE);
@@ -309,21 +350,52 @@ public class MainActivity extends android.app.Activity {
         content.addView(info);
     }
 
-    private void nextExercise() {
+    private void continueAfterWork() {
         stopTimer();
-        activeExerciseIndex++;
-        activeSet = 1;
-        if (activeExerciseIndex >= activeWorkout.size()) {
-            prefs().edit()
-                    .putBoolean("pending_workout_finish", true)
-                    .putString("pending_workout_title", activePlan.title)
-                    .putInt("pending_workout_count", activeWorkout.size())
-                    .apply();
-            Toast.makeText(this, "Нажми «Завершить тренировку» на главном экране", Toast.LENGTH_LONG).show();
-            showHome();
+        if (activeStepIndex >= workoutSteps.size() - 1) {
+            finishGuidedWorkout();
         } else {
-            showCurrentExercise();
+            showRestScreen(workoutSteps.get(activeStepIndex).exercise);
         }
+    }
+
+    private void showRestScreen(TrainingData.Exercise previousExercise) {
+        clear("home");
+        bottomBar.setVisibility(View.GONE);
+        restMode = true;
+        secondsLeft = previousExercise.restSeconds;
+        addHeader("Отдых", "Следующий подход начнется после восстановления");
+
+        LinearLayout rest = card(DEEP);
+        rest.setGravity(Gravity.CENTER_VERTICAL);
+        timerMode = text("Отдых после: " + previousExercise.name, 16, true, Color.rgb(177, 228, 207));
+        timerClock = text(format(secondsLeft), 64, true, Color.WHITE);
+        timerClock.setGravity(Gravity.CENTER);
+        timerProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        timerProgress.setMax(secondsLeft);
+        timerProgress.setProgress(secondsLeft);
+        rest.addView(timerMode);
+        rest.addView(timerClock);
+        rest.addView(timerProgress, new LinearLayout.LayoutParams(-1, dp(12)));
+        continueButton = primaryButton("Продолжить");
+        setPrimaryEnabled(continueButton, false);
+        continueButton.setOnClickListener(v -> {
+            activeStepIndex++;
+            showCurrentWorkoutStep();
+        });
+        rest.addView(continueButton);
+        content.addView(rest, new LinearLayout.LayoutParams(-1, Math.max(dp(430), getResources().getDisplayMetrics().heightPixels - statusBarHeight() - dp(46))));
+        startTimer(previousExercise.restSeconds, true);
+    }
+
+    private void finishGuidedWorkout() {
+        append("workout_log", date() + " • " + activePlan.title + " • " + activeWorkout.size() + " упражнения");
+        addCompletedDate(isoDate(Calendar.getInstance()));
+        prefs().edit().putBoolean("pending_workout_finish", false).apply();
+        workoutSteps.clear();
+        activeWorkout.clear();
+        Toast.makeText(this, "Тренировка засчитана", Toast.LENGTH_SHORT).show();
+        showHome();
     }
 
     private void showExerciseLibrary() {
@@ -361,15 +433,38 @@ public class MainActivity extends android.app.Activity {
         clear("nutrition");
         addHeader("Питание", "Ориентир для набора массы при твоих тренировках");
         LinearLayout kcal = card(DEEP);
-        kcal.addView(text("3300 ккал в день", 28, true, Color.WHITE));
+        kcal.addView(text(totalSelectedCalories() + " ккал в день", 28, true, Color.WHITE));
         kcal.addView(text("Белок 130-160 г • креатин 3-5 г • вода 2.5-3.5 л", 15, false, Color.WHITE));
         content.addView(kcal);
 
-        addMeal("Завтрак", "3 яйца, 80-100 г овсянки или гречки, банан, 200 г творога или йогурта. Если не лезет еда: часть овсянки можно заменить коктейлем.");
-        addMeal("Обед", "180-220 г курицы/говядины/рыбы, 100-130 г сухого риса/пасты/гречки, 250-300 г овощей, 1-2 ложки оливкового масла.");
-        addMeal("Перекус", "Протеин 25-30 г белка, молоко или кефир, банан. Альтернатива: творог 200 г + мед/ягоды + хлеб.");
-        addMeal("Ужин", "180-220 г мяса/рыбы/творога/бобовых, картофель/рис/паста, овощи. Перед сном при недоборе: творог 150-200 г.");
+        for (String type : TrainingData.mealTypes()) addMealChoice(type);
         addMeal("Коррекция", "Если вес не растет 2 недели подряд, добавь 200-300 ккал: орехи 30 г, бутерброд, дополнительная крупа или коктейль с молоком.");
+    }
+
+    private int totalSelectedCalories() {
+        int total = 0;
+        for (String type : TrainingData.mealTypes()) {
+            List<TrainingData.MealOption> options = TrainingData.mealOptions(type);
+            if (!options.isEmpty()) total += options.get(selectedMealIndex(type, options.size())).calories;
+        }
+        return total;
+    }
+
+    private void addMealChoice(String type) {
+        List<TrainingData.MealOption> options = TrainingData.mealOptions(type);
+        if (options.isEmpty()) return;
+        int index = selectedMealIndex(type, options.size());
+        TrainingData.MealOption meal = options.get(index);
+        LinearLayout box = card(SURFACE);
+        box.addView(text(meal.type + " • " + meal.calories + " ккал", 19, true, INK));
+        box.addView(text(meal.text, 15, false, MUTED));
+        Button change = ghostButton("Изменить");
+        change.setOnClickListener(v -> {
+            prefs().edit().putInt(mealPrefsKey(type), (index + 1) % options.size()).apply();
+            showNutrition();
+        });
+        box.addView(change, new LinearLayout.LayoutParams(-1, dp(52)));
+        content.addView(box);
     }
 
     private void addMeal(String title, String body) {
@@ -439,7 +534,10 @@ public class MainActivity extends android.app.Activity {
         secondsLeft = seconds;
         restMode = rest;
         timerRunning = true;
-        timerProgress.setMax(seconds);
+        if (timerProgress != null) {
+            timerProgress.setMax(seconds);
+            timerProgress.setProgress(seconds);
+        }
         tick();
     }
 
@@ -450,9 +548,9 @@ public class MainActivity extends android.app.Activity {
             secondsLeft--;
             if (secondsLeft <= 0) {
                 timerRunning = false;
-                if (restMode) activeSet++;
                 Toast.makeText(this, restMode ? "Отдых закончен" : "Подход закончен", Toast.LENGTH_SHORT).show();
                 updateTimerLabels();
+                setPrimaryEnabled(continueButton, true);
                 return;
             }
             tick();
@@ -461,11 +559,18 @@ public class MainActivity extends android.app.Activity {
     }
 
     private void updateTimerLabels() {
-        if (timerClock == null || timerMode == null || timerProgress == null) return;
+        if (timerClock == null || timerMode == null) return;
         timerClock.setText(format(secondsLeft));
-        timerMode.setText("Подход " + activeSet + " • " + (restMode ? "отдых" : "работа"));
-        timerMode.setTextColor(restMode ? CORAL : GREEN);
-        timerProgress.setProgress(Math.max(secondsLeft, 0));
+        if (restMode) {
+            timerMode.setText("Отдых");
+            timerMode.setTextColor(Color.rgb(177, 228, 207));
+        } else {
+            WorkoutStep step = currentWorkoutStep();
+            String setLabel = step == null ? String.valueOf(activeSet) : step.setNumber + " из " + step.totalSets;
+            timerMode.setText("Подход " + setLabel + " • работа");
+            timerMode.setTextColor(GREEN);
+        }
+        if (timerProgress != null) timerProgress.setProgress(Math.max(secondsLeft, 0));
     }
 
     private void stopTimer() {
@@ -549,6 +654,20 @@ public class MainActivity extends android.app.Activity {
         return button;
     }
 
+    private void setPrimaryEnabled(Button button, boolean enabled) {
+        if (button == null) return;
+        button.setEnabled(enabled);
+        button.setTextColor(enabled ? Color.WHITE : MUTED);
+        button.setBackground(round(enabled ? GREEN : LINE, enabled ? GREEN : LINE, 22, 0));
+    }
+
+    private void setGhostEnabled(Button button, boolean enabled) {
+        if (button == null) return;
+        button.setEnabled(enabled);
+        button.setTextColor(enabled ? DEEP : MUTED);
+        button.setBackground(round(enabled ? SOFT_GREEN : LINE, enabled ? SOFT_GREEN : LINE, 18, 0));
+    }
+
     private Button choiceButton(String label, boolean active) {
         Button button = new Button(this);
         button.setText(label);
@@ -620,6 +739,54 @@ public class MainActivity extends android.app.Activity {
         return "Отдых";
     }
 
+    private WorkoutStep currentWorkoutStep() {
+        if (activeStepIndex < 0 || activeStepIndex >= workoutSteps.size()) return null;
+        return workoutSteps.get(activeStepIndex);
+    }
+
+    private boolean isTimedExercise(TrainingData.Exercise exercise) {
+        return exercise.target.toLowerCase(Locale.ROOT).contains("сек");
+    }
+
+    private int setCountFor(TrainingData.Exercise exercise) {
+        String target = exercise.target.toLowerCase(Locale.ROOT);
+        int x = target.indexOf("x");
+        if (x <= 0) return 3;
+        String prefix = target.substring(0, x).trim();
+        StringBuilder digits = new StringBuilder();
+        for (int i = 0; i < prefix.length(); i++) {
+            char c = prefix.charAt(i);
+            if (Character.isDigit(c)) digits.append(c);
+            else if (digits.length() > 0) break;
+        }
+        if (digits.length() == 0) return 3;
+        try {
+            return Math.max(1, Integer.parseInt(digits.toString()));
+        } catch (Exception ignored) {
+            return 3;
+        }
+    }
+
+    private String setGoalFor(TrainingData.Exercise exercise) {
+        String target = exercise.target;
+        int x = target.toLowerCase(Locale.ROOT).indexOf("x");
+        if (x < 0 || x + 1 >= target.length()) return target;
+        return target.substring(x + 1).trim();
+    }
+
+    private int selectedMealIndex(String type, int size) {
+        if (size <= 0) return 0;
+        int index = prefs().getInt(mealPrefsKey(type), 0);
+        return index < 0 || index >= size ? 0 : index;
+    }
+
+    private String mealPrefsKey(String type) {
+        if ("Завтрак".equals(type)) return "meal_breakfast_index";
+        if ("Обед".equals(type)) return "meal_lunch_index";
+        if ("Перекус".equals(type)) return "meal_snack_index";
+        return "meal_dinner_index";
+    }
+
     private void append(String key, String line) {
         String old = prefs().getString(key, "");
         prefs().edit().putString(key, line + "\n" + old).apply();
@@ -631,11 +798,7 @@ public class MainActivity extends android.app.Activity {
     }
 
     private boolean hasEntryForToday() {
-        String today = isoDate(Calendar.getInstance());
-        for (String line : prefs().getString("weight_entries", "").split("\n")) {
-            if (line.startsWith(today + "|")) return true;
-        }
-        return false;
+        return hasWeightEntry(isoDate(Calendar.getInstance()));
     }
 
     private void addCompletedDate(String isoDate) {
@@ -657,36 +820,71 @@ public class MainActivity extends android.app.Activity {
     }
 
     private void ensurePlanStartDate() {
-        if (prefs().getInt("migration_version", 0) < MIGRATION_VERSION) {
-            Calendar start = Calendar.getInstance();
-            start.set(Calendar.HOUR_OF_DAY, 0);
-            start.set(Calendar.MINUTE, 0);
-            start.set(Calendar.SECOND, 0);
-            start.set(Calendar.MILLISECOND, 0);
+        int version = prefs().getInt("migration_version", 0);
+        boolean freshInstall = version == 0 && !prefs().contains("plan_start_millis");
+        long releaseStart = dayMillis(2026, 5, 18);
+        long currentStart = prefs().getLong("plan_start_millis", releaseStart);
+        if (freshInstall) {
             prefs().edit()
-                    .putLong("plan_start_millis", start.getTimeInMillis())
+                    .putLong("plan_start_millis", todayStartMillis())
                     .putInt("migration_version", MIGRATION_VERSION)
-                    .remove("current_week")
-                    .remove("weight_entries")
-                    .remove("completed_dates")
-                    .remove("workout_log")
-                    .remove("exercise_log")
-                    .remove("pending_workout_finish")
-                    .remove("pending_workout_title")
-                    .remove("pending_workout_count")
                     .apply();
             return;
         }
-        if (prefs().contains("plan_start_millis")) return;
+        if (!prefs().contains("plan_start_millis") || (version > 0 && version < MIGRATION_VERSION && currentStart > releaseStart)) {
+            prefs().edit().putLong("plan_start_millis", releaseStart).apply();
+        }
+        if (version > 0 && version < MIGRATION_VERSION) {
+            seedReleaseProgressDefaults();
+            prefs().edit().putInt("migration_version", MIGRATION_VERSION).apply();
+        }
+    }
+
+    private void seedReleaseProgressDefaults() {
+        seedWeightEntry("2026-05-18", "75.0");
+        seedWeightEntry("2026-05-19", "75.4");
+        seedWeightEntry("2026-05-20", "75.6");
+        seedWeightEntry("2026-05-21", "74.4");
+        seedWeightEntry("2026-05-22", "74.5");
+        seedWeightEntry("2026-05-23", "74.8");
+        seedWeightEntry("2026-05-24", "74.5");
+        addCompletedDate("2026-05-18");
+        addCompletedDate("2026-05-20");
+        addCompletedDate("2026-05-23");
+    }
+
+    private void seedWeightEntry(String isoDate, String weight) {
+        if (hasWeightEntry(isoDate)) return;
+        String old = prefs().getString("weight_entries", "");
+        prefs().edit().putString("weight_entries", isoDate + "|" + weight + "\n" + old).apply();
+    }
+
+    private boolean hasWeightEntry(String isoDate) {
+        for (String line : prefs().getString("weight_entries", "").split("\n")) {
+            if (line.startsWith(isoDate + "|")) return true;
+        }
+        return false;
+    }
+
+    private long dayMillis(int year, int month, int dayOfMonth) {
+        Calendar start = Calendar.getInstance();
+        start.set(Calendar.YEAR, year);
+        start.set(Calendar.MONTH, month - 1);
+        start.set(Calendar.DAY_OF_MONTH, dayOfMonth);
+        start.set(Calendar.HOUR_OF_DAY, 0);
+        start.set(Calendar.MINUTE, 0);
+        start.set(Calendar.SECOND, 0);
+        start.set(Calendar.MILLISECOND, 0);
+        return start.getTimeInMillis();
+    }
+
+    private long todayStartMillis() {
         Calendar start = Calendar.getInstance();
         start.set(Calendar.HOUR_OF_DAY, 0);
         start.set(Calendar.MINUTE, 0);
         start.set(Calendar.SECOND, 0);
         start.set(Calendar.MILLISECOND, 0);
-        prefs().edit()
-                .putLong("plan_start_millis", start.getTimeInMillis())
-                .putInt("migration_version", MIGRATION_VERSION)
-                .apply();
+        return start.getTimeInMillis();
     }
 
     private long planStartMillis() {
@@ -784,6 +982,18 @@ public class MainActivity extends android.app.Activity {
                 || value.contains("подъем ног")
                 || value.contains("hollow")
                 || value.contains("планк");
+    }
+
+    private static class WorkoutStep {
+        final TrainingData.Exercise exercise;
+        final int setNumber;
+        final int totalSets;
+
+        WorkoutStep(TrainingData.Exercise exercise, int setNumber, int totalSets) {
+            this.exercise = exercise;
+            this.setNumber = setNumber;
+            this.totalSets = totalSets;
+        }
     }
 
     public static class ExerciseAnimationView extends View {
